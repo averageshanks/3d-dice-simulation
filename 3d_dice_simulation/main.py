@@ -24,28 +24,48 @@ class Entity:
         self.position = np.array(position, dtype=np.float32)
         self.eulers = np.array(eulers, dtype=np.float32)
         self.is_rolling = False
-        self.rotation_speed = 3
+        self.rotation_speed = 2 
         self.revolving_speed = 2
         self.roll_counter = 0
-        self.roll_duration = 2
+        self.roll_duration = 300
         self.target_side = random.randint(1, 6)
         self.stop_all_rotation = False
 
     def update(self) -> None:
         if self.is_rolling:
+            # Increment rotation angles for all three axes
+            self.eulers[0] += self.revolving_speed
             self.eulers[1] += self.rotation_speed
+            self.eulers[2] += self.revolving_speed
+
+            if self.eulers[0] > 360:
+                self.eulers[0] -= 360
             if self.eulers[1] > 360:
                 self.eulers[1] -= 360
-                self.roll_counter += 1
+            if self.eulers[2] > 360:
+                self.eulers[2] -= 360
+
+            # Update roll progress
+            roll_progress = self.roll_counter / self.roll_duration
+
+            # Calculate the angle needed to show each face during rolling
+            target_rotation = (self.target_side - 1) * (360 / 6)
+            
+
+            # Interpolate between the current rotation and the target rotation
+            self.eulers[1] = np.interp(roll_progress, [0, 1], [0, target_rotation + 360])
+
+            self.roll_counter += 1
 
             if self.roll_counter >= self.roll_duration:
                 # Stop rolling and rotations when the target side is reached
                 self.is_rolling = False
                 self.roll_counter = 0
-                self.stop_all_rotation = True
+
+                self.target_side = random.randint(1, 6)
 
         # Apply revolving transformation only if not stopped
-        if not self.stop_all_rotation:
+        if not self.stop_all_rotation and self.is_rolling:
             self.eulers[0] += self.revolving_speed
             if self.eulers[0] > 360:
                 self.eulers[0] -= 360
@@ -88,8 +108,27 @@ class Entity:
                 )
             )
 
-        # Orient the dice to stand vertically when it stops
+        # Orient the dice to stand vertically or horizontally when it stops
         if not self.is_rolling and not self.stop_all_rotation:
+            if self.target_side % 2 == 0:  # If target side is even, stop horizontally
+                model_transform = pyrr.matrix44.multiply(
+                    m1=model_transform,
+                    m2=pyrr.matrix44.create_from_axis_rotation(
+                        axis=[1, 0, 0],
+                        theta=np.radians(90),
+                        dtype=np.float32
+                    )
+                )
+            else:  # If target side is odd, stop vertically
+                model_transform = pyrr.matrix44.multiply(
+                    m1=model_transform,
+                    m2=pyrr.matrix44.create_from_axis_rotation(
+                        axis=[0, 1, 1],
+                        theta=np.radians(90),
+                        dtype=np.float32
+                    )
+                )
+
             # Determine the rotation needed to face the target side
             target_rotation = (self.target_side - 1) * (360 / 6)
             # Apply the rotation to face the target side
@@ -108,7 +147,6 @@ class Entity:
                 vec=np.array(self.position), dtype=np.float32
             )
         )
-
 
 class Mesh:
     def __init__(self, filename: str):
@@ -217,23 +255,33 @@ class App:
         self._set_up_timer()
         self._set_up_opengl()
         self._create_assets()
+        # Set view_matrix before calling _set_onetime_uniforms
+        self.camera_position = np.array([0, 0, 0], dtype=np.float32)
+        self.camera_target = np.array([0, 0, -1], dtype=np.float32)
+        self.camera_up = np.array([0, 1, 0], dtype=np.float32)
+        self.view_matrix = pyrr.matrix44.create_look_at(
+            self.camera_position,
+            self.camera_target,
+            self.camera_up,
+            dtype=np.float32
+        )
         self._set_onetime_uniforms()
         self._get_uniform_locations()
-    
+
     def _set_up_pygame(self) -> None:
         pg.init()
         pg.display.gl_set_attribute(pg.GL_CONTEXT_MAJOR_VERSION, 3)
         pg.display.gl_set_attribute(pg.GL_CONTEXT_MINOR_VERSION, 3)
         pg.display.gl_set_attribute(pg.GL_CONTEXT_PROFILE_MASK, pg.GL_CONTEXT_PROFILE_CORE)
         pg.display.set_mode((640, 480), pg.OPENGL | pg.DOUBLEBUF)
-    
+
     def _set_up_timer(self) -> None:
         self.clock = pg.time.Clock()
-    
+
     def _set_up_opengl(self) -> None:
         glClearColor(0.1, 0.2, 0.2, 1)
         glEnable(GL_DEPTH_TEST)
-    
+
     def _create_assets(self) -> None:
         self.cube = Entity(
             position=[0, 0, -9],
@@ -245,23 +293,31 @@ class App:
             vertex_filepath="shaders/vertex.txt",
             fragment_filepath="shaders/fragment.txt"
         )
-    
+
     def _set_onetime_uniforms(self) -> None:
         glUseProgram(self.shader)
         glUniform1i(glGetUniformLocation(self.shader, "imageTexture"), 0)
+
+        glUniformMatrix4fv(
+            glGetUniformLocation(self.shader, "view"),
+            1, GL_FALSE, self.view_matrix
+        )
         projection_transform = pyrr.matrix44.create_perspective_projection(
-            fovy=45, aspect=640 / 480,
-            near=0.1, far=10, dtype=np.float32
+            fovy=60,  # Adjust this value to a smaller angle
+            aspect=640 / 480,
+            near=0.1,
+            far=10,
+            dtype=np.float32
         )
         glUniformMatrix4fv(
             glGetUniformLocation(self.shader, "projection"),
             1, GL_FALSE, projection_transform
         )
-    
+
     def _get_uniform_locations(self) -> None:
         glUseProgram(self.shader)
         self.modelMatrixLocation = glGetUniformLocation(self.shader, "model")
-    
+
     def _handle_input(self) -> None:
         keys = pg.key.get_pressed()
         if keys[pg.K_r]:
@@ -269,26 +325,23 @@ class App:
             # Randomize the target side when 'r' is pressed
             self.cube.target_side = random.randint(1, 6)
 
-    
     def run(self) -> None:
         running = True
         while running:
             for event in pg.event.get():
                 if event.type == pg.QUIT:
                     running = False
-    
+
             self._handle_input()
             self.cube.update()
 
-            # if not self.cube.is_rolling:
-            #     stopped_side = self.cube.get_target_side()
-            #     print(f"The cube has stopped at side {stopped_side}")
-                
+            if not self.cube.is_rolling:
+                stopped_side = self.cube.get_target_side()
+                print(f"The cube has stopped at side {stopped_side}")
 
-    
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
             glUseProgram(self.shader)
-    
+
             glUniformMatrix4fv(
                 self.modelMatrixLocation, 1, GL_FALSE,
                 self.cube.get_model_transform()
@@ -297,26 +350,26 @@ class App:
             self.cube_mesh.arm_for_drawing()
             self.cube_mesh.draw()
 
-            # self.print_debug_info()
-    
+            self.print_debug_info()
+
             pg.display.flip()
-    
+
             self.clock.tick(60)
-    
+
     def quit(self) -> None:
         self.cube_mesh.destroy()
         self.wood_texture.destroy()
         glDeleteProgram(self.shader)
         pg.quit()
 
-    # def print_debug_info(self) -> None:
-    #     print(f"Is rolling: {self.cube.is_rolling}")
-    #     print(f"Eulers: {self.cube.eulers}")
-    #     target_side = self.cube.get_target_side()
-    #     print(f"Target side: {target_side}")
+    def print_debug_info(self) -> None:
+        print(f"Is rolling: {self.cube.is_rolling}")
+        print(f"Eulers: {self.cube.eulers}")
+        target_side = self.cube.get_target_side()
+        print(f"Target side: {target_side}")
 
 
 if __name__ == "__main__":
     my_app = App()
     my_app.run()
-    my_app._handle_input()
+    my_app.quit()
